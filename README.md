@@ -1,4 +1,6 @@
-# Code Repository for Inspection Planning
+# Robotics Brewing
+
+A solver for Graph Inspection.
 
 ## Dependencies
 
@@ -54,3 +56,8 @@ If you get a linker error with Gurobi, try the following steps.
   - If you are using GCC 13, set to `C++ = g++-13`.
 - Run `make`.
 - Copy the created file to the `lib` directory; run: `sudo cp -i libgurobi_c++.a ../../lib/`.
+
+## Reproducing paper experiemnts
+
+- See https://github.com/TheoryInPractice/robotic-brewing/wiki/Paper-Experiments
+
