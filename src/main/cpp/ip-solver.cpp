@@ -123,7 +123,7 @@ int main(int argc, char* argv[]) {
       log_info_("Using algorithm: AlgebraicSolver");
       solver = std::make_unique<algorithm::exact::AlgebraicSolver>(  //
           instance.graph, rand, conf.num_threads, conf.algebraic_num_failures, conf.algebraic_recover_all,
-          conf.algebraic_search_strategy, conf.algebraic_compact_level, true, !conf.no_cert);
+          conf.algebraic_search_strategy, conf.algebraic_compact_level, conf.algebraic_recovery_strategy, true, !conf.no_cert);
       break;
     }
     case app::solver::Algorithm::NaiveDPSolver: {

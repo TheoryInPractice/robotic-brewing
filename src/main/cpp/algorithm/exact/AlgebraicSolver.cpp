@@ -12,9 +12,11 @@ using CompactColorSet = AlgebraicSolver::CompactColorSet;
 //==============================================================================
 namespace impl {
 
+static double const SINGLE_RUN_SUCCESS_PROBABILITY = 0.2;
+
 static std::set<std::tuple<int, int, int, int>> create_circuit_internal(  //
     base::BaseSolver const *solver,                                       //
-    int compact_level,                                                    //
+    algebraic::CompactStrategy compact_level,                             //
     int k,                                                                //
     int s,                                                                //
     int t,                                                                //
@@ -30,7 +32,7 @@ static std::set<std::tuple<int, int, int, int>> create_circuit_internal(  //
   std::map<std::tuple<int, int>, int> color_node_map;
 
   // create vertex (* multiplicity) nodes
-  if (compact_level == 1) {
+  if (compact_level == algebraic::CompactStrategy::SemiCompact) {
     for (auto v : g.vertices()) {
       if (v == s || v == t) continue;
 
@@ -58,19 +60,23 @@ static std::set<std::tuple<int, int, int, int>> create_circuit_internal(  //
       // create or get vertex node
       int color_node;
       switch (compact_level) {
-        case 0: {
+        case algebraic::CompactStrategy::Standard: {
           color_node = solver->get_compact_colors(v).front();  // get a variable node
           break;
         }
-        case 1: {
+        case algebraic::CompactStrategy::SemiCompact: {
           color_node = color_node_map.at(std::make_pair(v, 0));
           break;
         }
-        case 2: {
+        case algebraic::CompactStrategy::Compact: {
           std::vector<int> colors;
           for (auto c : solver->get_compact_colors(v)) colors.push_back(c);  // convert to int vector
           color_node = circ.add_addition_gate(colors, false);                // create an aggretated node
           if (color_nodes) color_nodes->insert(color_node);
+          break;
+        }
+        case algebraic::CompactStrategy::Naive: {
+          color_node = solver->get_compact_colors(v).front();  // get a variable node
           break;
         }
         default: {
@@ -84,18 +90,50 @@ static std::set<std::tuple<int, int, int, int>> create_circuit_internal(  //
         if (d > ub) continue;  // this edge cannot be in the solution walk
 
         auto mul_id = circ.add_multiplication_gate({color_node}, false);
-        active[current].insert(std::make_tuple(mul_id, v, d, compact_level == 1 ? 1 : 0));
+        active[current].insert(std::make_tuple(mul_id, v, d, compact_level == algebraic::CompactStrategy::SemiCompact ? 1 : 0));
 
         // update vertex lookup table
         if (node_ids) (*node_ids)[mul_id] = v;
+      } else if (compact_level == algebraic::CompactStrategy::Naive) {
+        // internal layers (naive implementation)
+
+        std::unordered_map<int, int> v_ids;  // weight -> addition node id
+
+        for (auto &[prev_node_id, prev_v, prev_d, mult] : active[current ^ 1]) {
+          if (prev_v == v) continue;  // do not revisit the same vertex
+
+          // if `prev_v` can collect all colors of `v`, no need to move to `v`
+          if (prev_v != v && solver->get_compact_colors(v).is_subset_of(solver->get_compact_colors(prev_v))) continue;
+
+          // move to a different vertex
+          int d = (prev_v == v ? 0 : g.get_weight(prev_v, v)) + prev_d;
+          if (d > ub) continue;  // over-budget
+
+          // create a new multiplication gate
+          auto mul_id = circ.add_multiplication_gate({prev_node_id, color_node}, false);
+
+          if (util::contains(v_ids, d)) {
+            // already visited
+            circ.add_edge(mul_id, v_ids.at(d));
+          } else {
+            // create a new addition gate
+            auto add_id = circ.add_addition_gate({mul_id}, false);
+
+            // register and enqueue new nodes
+            v_ids[d] = add_id;
+            if (node_ids) (*node_ids)[add_id] = v;
+            active[current].insert(std::make_tuple(add_id, v, d, 0));
+          }
+        }
       } else {
         // internal layers
         std::unordered_map<int, int> v_ids;  // weight -> addition node id
 
         for (auto &[prev_node_id, prev_v, prev_d, mult] : active[current ^ 1]) {
-          if (compact_level == 0 && prev_v == v) continue;  // do not revisit the same vertex
+          if (compact_level == algebraic::CompactStrategy::Standard && prev_v == v)
+            continue;  // do not revisit the same vertex
 
-          if (compact_level == 1 && prev_v == v) {
+          if (compact_level == algebraic::CompactStrategy::SemiCompact && prev_v == v) {
             // repeating vertex: collect more colors
             if (mult >= static_cast<int>(solver->get_compact_colors(v).size()))
               continue;  // already collected all colors at v
@@ -105,7 +143,8 @@ static std::set<std::tuple<int, int, int, int>> create_circuit_internal(  //
 
             // register and enqueue new node
             if (node_ids) (*node_ids)[mul_id] = v;
-            active[current].insert(std::make_tuple(mul_id, v, prev_d, compact_level == 1 ? mult + 1 : 0));
+            active[current].insert(std::make_tuple(
+                mul_id, v, prev_d, compact_level == algebraic::CompactStrategy::SemiCompact ? mult + 1 : 0));
           } else {
             // if `prev_v` can collect all colors of `v`, no need to move to `v`
             if (prev_v != v && solver->get_compact_colors(v).is_subset_of(solver->get_compact_colors(prev_v))) continue;
@@ -125,7 +164,7 @@ static std::set<std::tuple<int, int, int, int>> create_circuit_internal(  //
               // register and enqueue new nodes
               v_ids[d] = add_id;
               if (node_ids) (*node_ids)[mul_id] = v;
-              active[current].insert(std::make_tuple(mul_id, v, d, compact_level == 1 ? 1 : 0));
+              active[current].insert(std::make_tuple(mul_id, v, d, compact_level == algebraic::CompactStrategy::SemiCompact ? 1 : 0));
             }
           }
         }
@@ -139,19 +178,22 @@ static std::set<std::tuple<int, int, int, int>> create_circuit_internal(  //
   return active[current ^ 1];
 }
 
-static void create_circuit(                  //
-    base::BaseSolver const *solver,          //
-    bool multiple_output,                    //
-    int compact_level,                       //
-    int k,                                   //
-    int s,                                   //
-    int t,                                   //
-    int lb,                                  //
-    int ub,                                  //
-    Circuit &circ,                           //
-    std::unordered_map<int, int> *node_ids,  //
-    std::unordered_set<int> *color_nodes     //
+static void create_circuit(                    //
+    base::BaseSolver const *solver,            //
+    bool multiple_output,                      //
+    algebraic::CompactStrategy compact_level,  //
+    int k,                                     //
+    int s,                                     //
+    int t,                                     //
+    int lb,                                    //
+    int ub,                                    //
+    Circuit &circ,                             //
+    std::unordered_map<int, int> *node_ids,    //
+    std::unordered_set<int> *color_nodes       //
 ) {
+  util::Timer circuit_create_time;
+  log_debug("%s: Started: Creating Circuit using compact_level=%d", solver->get_solver_name(), compact_level);
+
   auto last_layer = create_circuit_internal(solver, compact_level, k, s, t, lb, ub, circ, node_ids, color_nodes);
 
   // connection to root
@@ -172,9 +214,30 @@ static void create_circuit(                  //
     assert(circ.number_of_output_nodes() == 1);
   }
 
-  log_trace("%s: Created circuit: k=%d, s=%d, t=%d, lb=%d, ub=%d, #nodes=%lu (+:%lu, *:%lu), #edges=%lu",
+  log_debug("%s: Created circuit: k=%d, s=%d, t=%d, lb=%d, ub=%d, #nodes=%lu (+:%lu, *:%lu), #edges=%lu, elapsed=%.3f",
             solver->get_solver_name(), k, s, t, lb, ub, circ.number_of_nodes(), circ.number_of_addition_gates(),
-            circ.number_of_multiplication_gates(), circ.number_of_edges());
+            circ.number_of_multiplication_gates(), circ.number_of_edges(), circuit_create_time.stop());
+}
+
+/**
+ * @brief Adjusts the number of trials for deciding infeasible values so that the success probability remains.
+ *
+ * @param original_num_trials original number of trials
+ * @param success_probability single-run success probability
+ * @param num_runs number of runs of detections
+ * @return int adjusted number of trials
+ */
+static int adjust_num_trials(int original_num_trials, double success_probability, int num_runs) {
+  auto q = 1 - success_probability;
+  int num_trials = original_num_trials;
+  double target_p = std::pow(q, original_num_trials);  // target success probability
+
+  while (true) {
+    auto qtheta = std::pow(q, num_trials);
+    if (std::pow(1 - qtheta, num_runs) >= 1 - target_p) break;
+    ++num_trials;
+  }
+  return num_trials;
 }
 }  // namespace impl
 
@@ -231,8 +294,11 @@ void AlgebraicSolver::solve_main(int k, Vertex source, Vertex destination, std::
   create_transitive_closure(true, cancel_token);
   remove_colorless_vertices({source, destination});  // keep source and destination
   round_weights();                                   // round weights after creating the transitive closure
+  create_transitive_closure(true, cancel_token);     // again, we need to make the graph metric
 
-  if (compact_level_ == 0) { split_colors(true); }
+  if (compact_level_ == algebraic::CompactStrategy::Standard || compact_level_ == algebraic::CompactStrategy::Naive) {
+    split_colors(true);
+  }
   compact_colors();  // re-index colors
 
   log_info("%s: Finished preprocessing: n=%lu, m=%lu, |C|=%lu", get_solver_name(), get_graph().number_of_vertices(),
@@ -302,7 +368,7 @@ void AlgebraicSolver::solve_main(int k, Vertex source, Vertex destination, std::
   }
   if (!recover_all_) {
     // solution recovery
-    find_certificate(k, source, destination, c, hi, cancel_token);
+    find_certificate(k, source, destination, c, hi, num_confident_failures_, cancel_token);
   }
   log_info("%s: Found optimal walk length: %d, elapsed=%.3fs", get_solver_name(), hi, search_timer.stop());
 }
@@ -325,12 +391,20 @@ void AlgebraicSolver::solve_main(int k, Vertex source, Vertex destination, std::
  */
 int AlgebraicSolver::run_standard_binary_search(int k, int source, int destination, int c, int lo, int hi,
                                                 std::atomic_bool *cancel_token) {
+  // adjust num_trials
+  int num_trials = impl::adjust_num_trials(num_confident_failures_, impl::SINGLE_RUN_SUCCESS_PROBABILITY,
+                                           std::floor(std::log2(hi - lo + 1)));
+  log_debug("%s: Adjusted num_trials for search: from=%d, to=%d", get_solver_name(), num_confident_failures_, num_trials);
+
+  // binary search
   while (lo < hi) {
     int m = (lo + hi) / 2;
     log_debug("%s: Testing objective: %d <- [%d, %d]", get_solver_name(), m, lo, hi);
     if (test_walk_length(k, source, destination, c, lo, m, num_confident_failures_, cancel_token)) {
-      hi = m;                                                                           // minimize feasible k
-      if (recover_all_) find_certificate(k, source, destination, c, hi, cancel_token);  // solution recovery
+      hi = m;  // minimize feasible k
+      if (recover_all_) {
+        find_certificate(k, source, destination, c, hi, num_confident_failures_, cancel_token);  // solution recovery
+      }
 
       // obtained weight can be less than the target
       hi = std::min(hi, static_cast<int>(get_solution_weight()));
@@ -389,25 +463,42 @@ int AlgebraicSolver::run_probabilistic_binary_search_naive(int k, int source, in
 }
 */
 
-/**
- * @brief Probabilistic binary search.
- *
- * @param k
- * @param source
- * @param destination
- * @param c
- * @param lb
- * @param ub
- * @param cancel_token
- * @return int
- */
+// /**
+//  * Deprecated: The "correct" version of this algorithm is quite slow.
+//  *
+//  * @brief Probabilistic binary search.
+//  *
+//  * @param k
+//  * @param source
+//  * @param destination
+//  * @param c
+//  * @param lb
+//  * @param ub
+//  * @param cancel_token
+//  * @return int
+//  */
+/*
 int AlgebraicSolver::run_probabilistic_binary_search(int k, int source, int destination, int c, int lo, int hi,
                                                      std::atomic_bool *cancel_token) {
-  double p = 1.0 / 3.0;  // estimated success probability
+  double const p = impl::SINGLE_RUN_SUCCESS_PROBABILITY;  // estimated success probability
+  std::vector<int> success_count(hi);
   std::vector<int> failure_count(hi);
   std::vector<double> weights(hi);
   bool scale_weights = false;
+  int orig_hi = hi;
+  int orig_range = hi - lo + 1;
+  double target_p = std::pow(1 - p, num_confident_failures_);
 
+  // precompute binomial coefficients
+  int max_a = hi - lo;  // there should be at most (hi-lo) successes
+  int max_b = (max_a + 1) * num_confident_failures_ - max_a;
+  std::vector<std::vector<double>> binom(max_a + max_b + 1, std::vector<double>(max_a + 1));
+  for (int i = 0; i <= max_a + max_b; ++i) {
+    binom[i][0] = 1.0;
+    for (int j = 1; j <= max_a && j <= i; ++j) { binom[i][j] = binom[i - 1][j] + binom[i - 1][j - 1]; }
+  }
+
+  // binary search with weights
   while (lo < hi) {
     double max_weight = *std::max_element(weights.begin() + lo, weights.begin() + hi);
     int m = 0;
@@ -436,29 +527,99 @@ int AlgebraicSolver::run_probabilistic_binary_search(int k, int source, int dest
     log_debug("%s: Testing objective: %d <- [%d, %d]", get_solver_name(), m, lo, hi);
 
     if (test_walk_length(k, source, destination, c, lo, m, 1, cancel_token)) {
-      hi = m;                                                                           // minimize feasible k
-      if (recover_all_) find_certificate(k, source, destination, c, hi, cancel_token);  // solution recovery
+      // printf("m=%d, T:F%d\n", m, failure_count[m]);
+      ++success_count[m];  // increment counter
+
+      hi = m;  // minimize feasible k
+      if (recover_all_) {
+        find_certificate(k, source, destination, c, hi, num_confident_failures_, cancel_token);  // solution recovery
+      }
 
       // obtained weight can be less than the target
       hi = std::min(hi, static_cast<int>(get_solution_weight()));
       scale_weights = true;
-      continue;
-    }
-    ++failure_count[m];  // increment counter
+    } else {
+      ++failure_count[m];  // increment counter
+      // printf("m=%d, F%d\n", m, failure_count[m]);
 
-    int cnt = 0;
-    for (int i = m; i < hi; ++i) cnt += failure_count[i];
+      // compute stats
+      for (int i = lo; i <= m; ++i) {
+        int a = 0, b = 0;
+        for (int j = i; j < orig_hi; ++j) {
+          a += success_count[j];
+          b += failure_count[j];
+        }
+        assert(a <= max_a);
+        assert(b <= max_b);
+        if (std::pow(1 - binom[a + b][a] * std::pow(p, a) * std::pow(1 - p, b), orig_range + 1) >= 1 - target_p) {
+        // if (binom[a + b][a] * std::pow(p, a) * std::pow(1 - p, b) < target_p / orig_range) {
+          lo = i + 1;  // confident enough to reject m
+          scale_weights = true;
+        }
+      }
 
-    if (cnt >= num_confident_failures_) {
-      lo = m + 1;  // confident enough to reject m
-      scale_weights = true;
-      continue;
+      // distribute weights to higher half
+      if (m >= lo) {
+        int nxt = (m + 1 + hi) / 2;
+        if (nxt < hi) {
+          auto diff = weights[m] * p;
+          weights[m] -= diff;
+          weights[nxt] += diff;
+        }
+      }
     }
-    int nxt = (m + 1 + hi) / 2;
-    if (nxt < hi) {
-      auto diff = weights[m] * p;
-      weights[m] -= diff;
-      weights[nxt] += diff;
+  }
+  return hi;
+}
+*/
+
+/**
+ * @brief Probabilistic binary search.
+ *
+ * @param k
+ * @param source
+ * @param destination
+ * @param c
+ * @param lb
+ * @param ub
+ * @param cancel_token
+ * @return int
+ */
+int AlgebraicSolver::run_probabilistic_binary_search(int k, int source, int destination, int c, int lo, int hi,
+                                                     std::atomic_bool *cancel_token) {
+  double const p = impl::SINGLE_RUN_SUCCESS_PROBABILITY;  // estimated success probability
+  // adjust num_trials
+  int num_trials = impl::adjust_num_trials(num_confident_failures_, p, hi - lo + 1);
+  log_debug("%s: Adjusted num_trials for search: from=%d, to=%d", get_solver_name(), num_confident_failures_, num_trials);
+
+  std::vector<std::pair<int, int>> mid_points;  // use as a stack of (ell, number of failures)
+
+  // binary search
+  while (lo < hi) {
+    if (mid_points.empty()) {
+      mid_points.push_back({(lo + hi) / 2, 0});  // create a new midpoint
+    }
+    int const m = mid_points.back().first;
+    log_debug("%s: Testing objective: %d <- [%d, %d]", get_solver_name(), m, lo, hi);
+
+    if (test_walk_length(k, source, destination, c, lo, m, 1, cancel_token)) {
+      hi = m;  // update upper bound
+      if (recover_all_) {
+        find_certificate(k, source, destination, c, hi, num_confident_failures_, cancel_token);  // solution recovery
+      }
+
+      // obtained weight can be less than the target
+      hi = std::min(hi, static_cast<int>(get_solution_weight()));
+      mid_points.pop_back();  // pop from stack
+    } else {
+      // increment failure counter and check with threshold
+      if (mid_points.back().second++ >= num_confident_failures_) {
+        lo = m + 1;          // confident enough to reject m
+        mid_points.clear();  // clear the stack
+      } else {
+        // go higher with some probability
+        if (m < hi - 1 && rand_.random() < 1 - p / 2) mid_points.push_back({(m + 1 + hi) / 2, 0});
+      }
     }
   }
   return hi;
@@ -469,8 +630,9 @@ int AlgebraicSolver::run_sequential_search(int k, int source, int destination, i
     int m = hi - 1;
     log_debug("%s: Testing objective: %d <- [%d, %d]", get_solver_name(), m, lo, hi);
     if (test_walk_length(k, source, destination, c, lo, m, num_confident_failures_, cancel_token)) {
-      hi = m;                                                                           // minimize feasible k
-      if (recover_all_) find_certificate(k, source, destination, c, hi, cancel_token);  // solution recovery
+      hi = m;  // minimize feasible k
+      if (recover_all_)
+        find_certificate(k, source, destination, c, hi, num_confident_failures_, cancel_token);  // solution recovery
 
       // obtained weight can be less than the target
       hi = std::min(hi, static_cast<int>(get_solution_weight()));
@@ -528,7 +690,7 @@ bool AlgebraicSolver::test_walk_length(int k, int s, int t, int c, int lb, int u
 //    Solution Recovery
 //==============================================================================
 
-void AlgebraicSolver::find_certificate(int k, int s, int t, int c, int walk_length, std::atomic_bool *cancel_token) {
+void AlgebraicSolver::find_certificate(int k, int s, int t, int c, int walk_length, int num_trials, std::atomic_bool *cancel_token) {
   log_info("%s: Finding certificate: objective=%d", get_solver_name(), walk_length);
   util::Timer timer;
 
@@ -542,8 +704,15 @@ void AlgebraicSolver::find_certificate(int k, int s, int t, int c, int walk_leng
            circ.number_of_multiplication_gates(), circ.number_of_edges(), k, num_threads_);
 
   // find a certificate circuit
+  bool use_las_vegas = recovery_strategy_ == algebraic::RecoveryStrategy::LV;
+  if (!use_las_vegas) {
+    int orig_num_trials = num_trials;
+    num_trials = impl::adjust_num_trials(num_trials, impl::SINGLE_RUN_SUCCESS_PROBABILITY,
+                                         k * std::log2(get_graph().number_of_vertices()));
+    log_debug("%s: Adjusted num_trials: from=%d, to=%d", get_solver_name(), orig_num_trials, num_trials);
+  }
   algebra::MultilinearDetector detector(circ, k, num_threads_);
-  auto cert = detector.find_certificate(rand_, color_nodes, cancel_token);
+  auto cert = detector.find_certificate(rand_, color_nodes, cancel_token, use_las_vegas, num_trials);
 
   // backtrack nodes in the certificate circuit
   std::vector<int> vs = {t};

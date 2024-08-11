@@ -15,6 +15,10 @@ namespace exact {
 namespace algebraic {
 /** Search strategy. */
 enum SearchStrategy { Basic, Probabilistic, Sequential, MultiOutput };
+
+enum CompactStrategy { Naive, Standard, SemiCompact, Compact };
+
+enum RecoveryStrategy { MC, LV };
 }  // namespace algebraic
 
 class AlgebraicSolver : public base::BaseSolver {
@@ -32,23 +36,34 @@ class AlgebraicSolver : public base::BaseSolver {
    * 1: Semi-compact: larger but more effective circuit than fully compact; does not split colors.
    * 2: Fully compact: asymptotically the smallest circuit; may be slow when each vertex has few colors.
    */
-  int compact_level_;
+  algebraic::CompactStrategy compact_level_;
+
+  /**
+   * @brief Solution Recovery Strategy.
+   *
+   * MC: Monte Carlo
+   * LV: Las Vegas
+   */
+  algebraic::RecoveryStrategy recovery_strategy_;
 
  public:
   using Circuit = algebra::ArithmeticCircuit<ds::set::SortedVectorSet>;
 
   AlgebraicSolver(ds::graph::Graph const &graph, util::Random &rand, int num_threads, int num_confident_failures = 30,
                   bool recover_all = false, algebraic::SearchStrategy search_strategy = algebraic::SearchStrategy::Probabilistic,
-                  int compact_level = 1, bool print_solution = false, bool print_certificate = false)
+                  algebraic::CompactStrategy compactStrategy = algebraic::CompactStrategy::SemiCompact,
+                  algebraic::RecoveryStrategy recoveryStrategy = algebraic::RecoveryStrategy::LV,
+                  bool print_solution = false, bool print_certificate = false)
       : base::BaseSolver("AlgebraicSolver", graph, print_solution, print_certificate),
         rand_(rand),
         num_threads_(num_threads),
         num_confident_failures_(num_confident_failures),
         recover_all_(recover_all),
         search_strategy_(search_strategy),
-        compact_level_(compact_level) {
+        compact_level_(compactStrategy),
+        recovery_strategy_(recoveryStrategy) {
     log_info("%s: Initialized: strategy=%d, #confident=%d, compact=%d", get_solver_name(), search_strategy_,
-             num_confident_failures, compact_level);
+             num_confident_failures, compactStrategy);
   }
 
   /**
@@ -117,7 +132,7 @@ class AlgebraicSolver : public base::BaseSolver {
 
   bool test_walk_length(int k, int s, int t, int c, int lb, int ub, int num_trials, std::atomic_bool *cancel_token);
 
-  void find_certificate(int k, int s, int t, int c, int walk_length, std::atomic_bool *cancel_token);
+  void find_certificate(int k, int s, int t, int c, int walk_length, int num_trials, std::atomic_bool *cancel_token);
 };
 }  // namespace exact
 }  // namespace algorithm

@@ -19,6 +19,20 @@ enum Algorithm {
   NaiveDPSolver,
 };
 
+/** Choice of compact level for algebraic solver. */
+enum CompactStrategy {
+  Naive,
+  Standard,
+  SemiCompact,
+  Compact,
+};
+
+/** Choice of recovery strategy for algebraic solver. */
+enum RecoveryStrategy {
+  MC,  // Monte Carlo
+  LV,  // Las Vegas
+};
+
 /** Choice of readers*/
 enum Reader {
   Auto,
@@ -56,7 +70,9 @@ class SolverConfiguration {
   int algebraic_num_failures = 30;
   bool algebraic_recover_all = false;  // true: recover a solution any time we find a new upper bound
   algorithm::exact::algebraic::SearchStrategy algebraic_search_strategy = algorithm::exact::algebraic::SearchStrategy::MultiOutput;
-  int algebraic_compact_level = 1;
+  algorithm::exact::algebraic::CompactStrategy algebraic_compact_level = algorithm::exact::algebraic::CompactStrategy::SemiCompact;
+  algorithm::exact::algebraic::RecoveryStrategy algebraic_recovery_strategy = algorithm::exact::algebraic::RecoveryStrategy::LV;
+
   double dp_epsilon = 0;
   double dp_rho = 1;
   double dp_scaling = 0;
@@ -102,8 +118,14 @@ class SolverConfiguration {
     app.add_option("--algebraic-search", algebraic_search_strategy, "Search strategy for AlgebraicSolver")
         ->option_text("ALG_SEARCH");
     app.add_option("--algebraic-compact", algebraic_compact_level,
-                   util::format("Circuit compact level in AlgebraicSolver (default:%d)", algebraic_compact_level));
+                   util::format("Circuit compact level in AlgebraicSolver [%s] (default:semicompact)", compact_options))
+        ->option_text("COMPACT")
+        ->transform(CLI::CheckedTransformer(compact_map_, CLI::ignore_case));
 
+    app.add_option("--algebraic-recovery", algebraic_recovery_strategy,
+                   util::format("Recovery Strategy in AlgebraicSolver [%s] (default:lv)", recovery_options))
+        ->option_text("RECOVERY")
+        ->transform(CLI::CheckedTransformer(recovery_map_, CLI::ignore_case));
     // For ILP
     app.add_flag("--ilp-output-gurobi-log", ilp_output_gurobi_log, "Print Gurobi Optimizer's output");
 
@@ -137,6 +159,20 @@ class SolverConfiguration {
       {"naivedp", NaiveDPSolver}       //
   };
   char const* algorithm_options = "dp, ilp, algebraic, naivedp";
+
+  std::map<std::string, CompactStrategy> compact_map_{
+      {"naive", Naive},              //
+      {"standard", Standard},        //
+      {"semicompact", SemiCompact},  //
+      {"compact", Compact},          //
+  };
+  char const* compact_options = "naive, standard, semicompact, compact";
+
+  std::map<std::string, RecoveryStrategy> recovery_map_{
+      {"mc", MC},  //
+      {"lv", LV},  //
+  };
+  char const* recovery_options = "mc, lv";
 
   // Update here when a new reader is introduced.
   std::map<std::string, Reader> reader_map_{
