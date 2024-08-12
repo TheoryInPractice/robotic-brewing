@@ -104,11 +104,14 @@ class MultilinearDetector {
    * @param rand util::Random instance
    * @param exceptions do not choose an in-neighbor on these addition gates
    * @param cancel_token cancelation token
+   * @param use_las_vegas to use Las Vegas solution recovery strategy
+   * @param monte_carlo_num_iterations number of iterations to run Multilinear Detector
    *
    * @return Circuit tree certificate
    */
   Circuit find_certificate(util::Random& rand, std::unordered_set<int> const& exceptions = {},
-                           std::atomic_bool* cancel_token = nullptr) {
+                           std::atomic_bool* cancel_token = nullptr, bool use_las_vegas = true,
+                           int monte_carlo_num_iterations = 30) {
     // Copy the given circuit and remove nodes unreachable to the output node.
     Circuit C = circuit_;
 
@@ -138,36 +141,61 @@ class MultilinearDetector {
       // Perform binary search.
       while (right - left > 1) {
         auto mid = (left + right) / 2;
-        auto a = left;
-        auto b = mid;
 
-        while (true) {
-          // Remove half of the in-edges.
-          for (auto i = a; i < b; ++i) C.remove_edge(us[i], v);
+        if (use_las_vegas) {
+          auto a = left;
+          auto b = mid;
 
-          // Run one iteration of multilinear detection.
-          MultilinearDetector det(C, k_, num_threads_, ell_);
-          auto ret = det.run_iteration(rand, cancel_token);
+          //--------------------------------------------------------------------
+          //    Las Vegas Solution Recovery
+          //--------------------------------------------------------------------
+          while (true) {
+            // Remove half of the in-edges.
+            for (auto i = a; i < b; ++i) C.remove_edge(us[i], v);
 
-          if (ret.front()) {
-            // Success; safe to remove.
-            if (a == left) {
-              left = b;
-            } else {
-              right = a;
+            // Run one iteration of multilinear detection.
+            MultilinearDetector det(C, k_, num_threads_, ell_);
+            auto ret = det.run_iteration(rand, cancel_token);
+
+            if (ret.front()) {
+              // Success; safe to remove.
+              if (a == left) {
+                left = b;
+              } else {
+                right = a;
+              }
+              break;
             }
-            break;
+
+            // Failure; restore edges and swap intervals.
+            for (auto i = a; i < b; ++i) C.add_edge(us[i], v);
+
+            if (a == left) {
+              a = mid;
+              b = right;
+            } else {
+              a = left;
+              b = mid;
+            }
           }
+        } else {
+          //--------------------------------------------------------------------
+          //    Monte Carlo Solution Recovery
+          //--------------------------------------------------------------------
+          // Remove half of the in-edges.
+          for (auto i = left; i < mid; ++i) C.remove_edge(us[i], v);
 
-          // Failure; restore edges and swap intervals.
-          for (auto i = a; i < b; ++i) C.add_edge(us[i], v);
+          MultilinearDetector det(C, k_, num_threads_, ell_);
+          auto ret = det.run(rand, monte_carlo_num_iterations, true, cancel_token);
 
-          if (a == left) {
-            a = mid;
-            b = right;
+          if (ret) {
+            // Success; safe to remove.
+            left = mid;
           } else {
-            a = left;
-            b = mid;
+            // Failure; remove the other part.
+            for (auto i = left; i < mid; ++i) C.add_edge(us[i], v);
+            for (auto i = mid; i < right; ++i) C.remove_edge(us[i], v);
+            right = mid;
           }
         }
       }
