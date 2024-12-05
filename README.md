@@ -1,4 +1,4 @@
-# Robotics Brewing
+# Robotic Brewing
 
 A solver for Graph Inspection.
 
