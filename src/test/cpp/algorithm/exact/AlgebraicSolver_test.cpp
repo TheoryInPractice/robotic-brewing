@@ -16,7 +16,8 @@ std::vector<algorithm::exact::algebraic::CompactStrategy> compact_strategies = {
     algorithm::exact::algebraic::CompactStrategy::SemiCompact, algorithm::exact::algebraic::CompactStrategy::Compact};
 
 std::vector<algorithm::exact::algebraic::RecoveryStrategy> recovery_strategies = {
-    algorithm::exact::algebraic::RecoveryStrategy::LV, algorithm::exact::algebraic::RecoveryStrategy::MC};
+    algorithm::exact::algebraic::RecoveryStrategy::LV, algorithm::exact::algebraic::RecoveryStrategy::MC,
+    algorithm::exact::algebraic::RecoveryStrategy::TP};
 
 template <typename T>
 void expect_in(T &actual, std::vector<T> const &expect) {
@@ -39,7 +40,9 @@ TEST(AlgebraicSolverTest, Solve) {
 
   for (int compact = 0; compact <= 3; ++compact) {
     for (int s = 0; s < 4; ++s) {
-      for (int recov = 0; recov < 2; ++recov) {
+      for (int recov = 0; recov < 3; ++recov) {
+        if (recov == 2 && compact <= 1) break;
+
         auto strategy = static_cast<algorithm::exact::algebraic::SearchStrategy>(s);
 
         int num_threads = 2;
@@ -163,7 +166,8 @@ TEST(AlgebraicSolverTest, SolveCorner) {
   util::set_log_level(util::logging::LogLevel::NONE);
   for (int compact = 0; compact < 3; ++compact) {
     for (int s = 0; s < 3; ++s) {
-      for (int recov = 0; recov < 2; ++recov) {
+      for (int recov = 0; recov < 3; ++recov) {
+        if (recov == 2 && compact <= 1) break;
         auto strategy = static_cast<algorithm::exact::algebraic::SearchStrategy>(s);
 
         int num_threads = 2;
@@ -209,5 +213,71 @@ TEST(AlgebraicSolverTest, SolveCorner) {
       }
     }
   }
+  util::set_log_level(util::logging::LogLevel::TRACE);
+}
+
+TEST(AlgebraicSolverTest, SolveRepeat) {
+  util::set_log_level(util::logging::LogLevel::NONE);
+
+  for (int compact = 2; compact <= 3; ++compact) {
+    int s = 3;
+    int recov = 2;
+    uint64_t seed = 123;
+    int num_repeat = 50;
+
+    auto strategy = static_cast<algorithm::exact::algebraic::SearchStrategy>(s);
+
+    int num_threads = 2;
+    int num_confident_failures = 10;  // increase here if test fails
+
+    for (int tt = 0; tt < num_repeat; ++tt) {
+      // printf("seed: %llu\n", seed);
+      util::Random rand(seed);
+      seed = seed * 3 + 7;
+
+      {
+        auto g = load_pace("src/test/resources/instances/001_tiny.gr").graph;
+        auto solver = AlgebraicSolver(g, rand, num_threads, num_confident_failures, false, strategy,
+                                      compact_strategies[compact], recovery_strategies[recov]);
+        EXPECT_TRUE(solver.solve(4, 0, 0));
+        EXPECT_TRUE(solver.is_feasible());
+
+        EXPECT_EQ(solver.get_solution_weight(), 16);
+        EXPECT_EQ(solver.get_solution_colors(), VI({0, 1, 2, 3}));
+        auto actual = solver.get_solution();
+        expect_in(actual, VVI({
+                              VI({0, 1, 0, 3, 4, 3, 0}),
+                              VI({0, 3, 4, 3, 0, 1, 0}),
+                          }));
+      }
+
+      {
+        auto g = load_pace("src/test/resources/instances/002_tiny.gr").graph;
+        auto solver = AlgebraicSolver(g, rand, num_threads, num_confident_failures, false, strategy,
+                                      compact_strategies[compact], recovery_strategies[recov]);
+
+        EXPECT_TRUE(solver.solve(4, 0, 0));
+        EXPECT_EQ(solver.get_solution_weight(), 15);
+        EXPECT_EQ(solver.get_solution_colors(), VI({0, 1, 2, 3}));
+        auto actual = solver.get_solution();
+        expect_in(actual, VVI({
+                              VI({0, 1, 2, 0}),
+                              VI({0, 2, 1, 0}),
+                          }));
+      }
+
+      {
+        auto g = load_pace("src/test/resources/instances/006_non_metric.gr").graph;
+        auto solver = AlgebraicSolver(g, rand, num_threads, num_confident_failures, false, strategy,
+                                      compact_strategies[compact], recovery_strategies[recov]);
+
+        EXPECT_TRUE(solver.solve(2, 0, 0));
+        EXPECT_EQ(solver.get_solution_weight(), 12);
+        EXPECT_EQ(solver.get_solution_colors(), VI({0, 1}));
+        EXPECT_EQ(solver.get_solution(), VI({0, 1, 2, 3, 2, 1, 0}));
+      }
+    }
+  }
+
   util::set_log_level(util::logging::LogLevel::TRACE);
 }

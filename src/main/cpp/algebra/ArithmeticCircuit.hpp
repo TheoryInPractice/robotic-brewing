@@ -197,6 +197,32 @@ class ArithmeticCircuit {
     --num_edges_;
   }
 
+  /**
+   * @brief Removes the given node and other dangling nodes if such ones exist.
+   *
+   * @param v node to remove first
+   */
+  void remove_and_clean_node(Node v) {
+    std::queue<std::pair<Node, int>> q;  // (node, direction)
+    q.push({v, 3});
+    while (!q.empty()) {
+      auto p = q.front();
+      q.pop();
+      auto u = p.first;
+      if (p.second & 1) {  // backward
+        for (auto w : in_neighbors_[u].to_vector()) {
+          if (out_degree(w) == 1 && !is_variable_node(w) && !is_output_node(w)) q.push({w, 1});
+        }
+      }
+      if (p.second & 2) {  // forward
+        for (auto w : out_neighbors_[u].to_vector()) {
+          if (in_degree(w) == 1 && !is_variable_node(w) && !is_output_node(w)) q.push({w, 2});
+        }
+      }
+      remove_node(u);
+    }
+  }
+
   //----------------------------------------------------------------------------
   //    Property accessors
   //----------------------------------------------------------------------------
@@ -293,7 +319,7 @@ class ArithmeticCircuit {
    *
    * Note: Variable nodes will not be removed.
    */
-  void remove_unreachable() {
+  void remove_unreachable(std::unordered_set<Node> const& exceptions = {}) {
     std::vector<bool> reachable(node_types_.size() - num_variables_);
 
     for (auto output_node : get_output_nodes()) {
@@ -305,11 +331,39 @@ class ArithmeticCircuit {
     }
 
     for (std::size_t i = num_variables_; i < node_types_.size(); ++i) {
-      if (has_node(i) && !reachable[i - num_variables_]) {
+      if (has_node(i) && !reachable[i - num_variables_] && !util::contains(exceptions, i)) {
         // log_trace("Removing node: %lu", i);
         remove_node(i);
       }
     }
+  }
+
+  /**
+   * @brief Checks if all the output nodes are reachable from any source.
+   *
+   * @return true all output nodes are reachable
+   * @return false there exists an unreachable output node
+   */
+  bool is_output_reachable() const {
+    std::queue<Node> q;
+    std::set<Node> reachable;
+    std::size_t output_count = 0;
+
+    // Run BFS.
+    for (Node i = 0; i < num_variables_; ++i) q.push(i);
+    while (!q.empty()) {
+      auto p = q.front();
+      q.pop();
+      for (auto v : out_neighbors_[p]) {
+        if (!util::contains(reachable, v)) {
+          if (is_output_node(v)) ++output_count;
+          reachable.insert(v);
+          q.push(v);
+        }
+      }
+    }
+
+    return output_count == num_output_nodes_;
   }
 
   std::vector<Edge> fingerprint_edges() const {

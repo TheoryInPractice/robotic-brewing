@@ -18,7 +18,7 @@ enum SearchStrategy { Basic, Probabilistic, Sequential, MultiOutput };
 
 enum CompactStrategy { Naive, Standard, SemiCompact, Compact };
 
-enum RecoveryStrategy { MC, LV };
+enum RecoveryStrategy { MC, LV, TP, None };
 }  // namespace algebraic
 
 class AlgebraicSolver : public base::BaseSolver {
@@ -33,8 +33,9 @@ class AlgebraicSolver : public base::BaseSolver {
    * @brief Circuit compact level.
    *
    * 0: Original idea: split all colors to distinct vertices.
-   * 1: Semi-compact: larger but more effective circuit than fully compact; does not split colors.
-   * 2: Fully compact: asymptotically the smallest circuit; may be slow when each vertex has few colors.
+   * 1: Standard
+   * 2: Semi-compact: larger but more effective circuit than fully compact; does not split colors.
+   * 3: Fully compact: asymptotically the smallest circuit; may be slow when each vertex has few colors.
    */
   algebraic::CompactStrategy compact_level_;
 
@@ -51,8 +52,8 @@ class AlgebraicSolver : public base::BaseSolver {
 
   AlgebraicSolver(ds::graph::Graph const &graph, util::Random &rand, int num_threads, int num_confident_failures = 30,
                   bool recover_all = false, algebraic::SearchStrategy search_strategy = algebraic::SearchStrategy::Probabilistic,
-                  algebraic::CompactStrategy compactStrategy = algebraic::CompactStrategy::SemiCompact,
-                  algebraic::RecoveryStrategy recoveryStrategy = algebraic::RecoveryStrategy::LV,
+                  algebraic::CompactStrategy compact_strategy = algebraic::CompactStrategy::SemiCompact,
+                  algebraic::RecoveryStrategy recovery_strategy = algebraic::RecoveryStrategy::LV,
                   bool print_solution = false, bool print_certificate = false)
       : base::BaseSolver("AlgebraicSolver", graph, print_solution, print_certificate),
         rand_(rand),
@@ -60,10 +61,17 @@ class AlgebraicSolver : public base::BaseSolver {
         num_confident_failures_(num_confident_failures),
         recover_all_(recover_all),
         search_strategy_(search_strategy),
-        compact_level_(compactStrategy),
-        recovery_strategy_(recoveryStrategy) {
+        compact_level_(compact_strategy),
+        recovery_strategy_(recovery_strategy) {
+    if (recovery_strategy == algebraic::RecoveryStrategy::TP) {
+      if (compact_strategy == algebraic::CompactStrategy::Naive || compact_strategy == algebraic::CompactStrategy::Standard) {
+        std::string msg = "Two phase recovery does not work with the following compact strategies: Naive, Standard";
+        throw std::invalid_argument(msg);
+      }
+    }
+
     log_info("%s: Initialized: strategy=%d, #confident=%d, compact=%d", get_solver_name(), search_strategy_,
-             num_confident_failures, compactStrategy);
+             num_confident_failures, compact_strategy);
   }
 
   /**

@@ -27,10 +27,14 @@ enum CompactStrategy {
   Compact,
 };
 
+enum SearchStrategy { Basic, Probabilistic, Sequential, MultiOutput };
+
 /** Choice of recovery strategy for algebraic solver. */
 enum RecoveryStrategy {
-  MC,  // Monte Carlo
-  LV,  // Las Vegas
+  MC,    // Monte Carlo
+  LV,    // Las Vegas
+  TP,    // Two phase
+  None,  // Skip solution recovery
 };
 
 /** Choice of readers*/
@@ -115,8 +119,10 @@ class SolverConfiguration {
         ->option_text("ALG_NUM_FAIL");
     app.add_flag("--algebraic-recover-all", algebraic_recover_all,
                  "Recover a solution for every new upper bound in AlgebraicSolver");
-    app.add_option("--algebraic-search", algebraic_search_strategy, "Search strategy for AlgebraicSolver")
-        ->option_text("ALG_SEARCH");
+    app.add_option("--algebraic-search", algebraic_search_strategy,
+                   util::format("Search strategy for AlgebraicSolver [%s] (default:multioutput)", search_options))
+        ->option_text("ALG_SEARCH")
+        ->transform(CLI::CheckedTransformer(search_map_, CLI::ignore_case));
     app.add_option("--algebraic-compact", algebraic_compact_level,
                    util::format("Circuit compact level in AlgebraicSolver [%s] (default:semicompact)", compact_options))
         ->option_text("COMPACT")
@@ -168,11 +174,21 @@ class SolverConfiguration {
   };
   char const* compact_options = "naive, standard, semicompact, compact";
 
-  std::map<std::string, RecoveryStrategy> recovery_map_{
-      {"mc", MC},  //
-      {"lv", LV},  //
+  std::map<std::string, SearchStrategy> search_map_{
+      {"basic", Basic},                  //
+      {"probabilistic", Probabilistic},  //
+      {"sequential", Sequential},        //
+      {"multioutput", MultiOutput}       //
   };
-  char const* recovery_options = "mc, lv";
+  char const* search_options = "basic, probabilistic, sequential, multioutput";
+
+  std::map<std::string, RecoveryStrategy> recovery_map_{
+      {"mc", MC},                        //
+      {"lv", LV},                        //
+      {"tp", TP},                        //
+      {"none", RecoveryStrategy::None},  //
+  };
+  char const* recovery_options = "mc, lv, tp, none";
 
   // Update here when a new reader is introduced.
   std::map<std::string, Reader> reader_map_{

@@ -13,9 +13,9 @@ def create_mul_table(ell):
             vec[i + j] += [(1, i, j)]
 
     for d in range(2 * ell - 2, ell - 1, -1):
-        for _, i, j in vec[d]:
+        for x, i, j in vec[d]:
             for e in degs:
-                vec[d - ell + e] += [(-1, i, j)]
+                vec[d - ell + e] += [(-x, i, j)]
         vec.pop()
 
     return vec
