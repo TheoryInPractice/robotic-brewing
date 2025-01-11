@@ -37,8 +37,11 @@ class TestFinitePolynomialRing(unittest.TestCase):
         self.assertEqual(x * y, y)
         self.assertEqual(x * 2, R([2, 0, 0, 0, 0]))
         self.assertEqual(x * x, x)
-        self.assertEqual(R([1, 1, 1, 1, 1]) * R([1, 2, 3, 2, 1]), R([0, 1, 2, 1, 2]))
+        self.assertEqual(R([1, 1, 1, 1, 1]) * R([1, 2, 3, 2, 1]), R([2, 1, 0, 1, 2]))
         self.assertRaises(NotImplementedError, lambda: x * 1.5)
+
+        R = FinitePolynomialRing(5, 256)
+        self.assertEqual(R([1, 1, 1, 1, 1]) * R([1, 2, 3, 2, 1]), R([250, 253, 252, 1, 6]))
 
     def test_repr(self):
         R = FinitePolynomialRing(5, 4)

@@ -99,6 +99,43 @@ TEST(ArithmeticCircuitTest, RemoveNode) {
   EXPECT_EQ(c2.evaluate(VI({2, 3})), VI({3}));
 }
 
+TEST(ArithmeticCircuitTest, RemoveAndCleanNode) {
+  auto c = algebra::ArithmeticCircuit<ds::set::SortedVectorSet>(2);
+  c.add_addition_gate(VI({0}), false);
+  c.add_addition_gate(VI({1}), true);
+  c.add_addition_gate(VI({1}), false);
+  c.add_multiplication_gate(VI({2, 3, 4}), false);
+  c.add_addition_gate(VI({5}), false);
+  c.add_addition_gate(VI({4}), false);
+  c.add_addition_gate(VI({5}), false);
+  c.add_edge(8, 6);
+  c.add_edge(8, 7);
+  c.add_multiplication_gate(VI({6, 7}), false);
+  c.add_multiplication_gate(VI({6}), false);
+  c.add_multiplication_gate(VI({10}), true);
+  c.add_multiplication_gate(VI({10, 9}), true);
+
+  EXPECT_EQ(c.number_of_nodes(), 13);
+  EXPECT_EQ(c.number_of_edges(), 17);
+
+  c.remove_and_clean_node(5);
+  EXPECT_TRUE(c.has_node(0));
+  EXPECT_TRUE(c.has_node(1));
+  EXPECT_FALSE(c.has_node(2));
+  EXPECT_TRUE(c.has_node(3));
+  EXPECT_TRUE(c.has_node(4));
+  EXPECT_FALSE(c.has_node(5));
+  EXPECT_FALSE(c.has_node(6));
+  EXPECT_TRUE(c.has_node(7));
+  EXPECT_FALSE(c.has_node(8));
+  EXPECT_TRUE(c.has_node(9));
+  EXPECT_FALSE(c.has_node(10));
+  EXPECT_TRUE(c.has_node(11));
+  EXPECT_TRUE(c.has_node(12));
+  EXPECT_EQ(c.number_of_nodes(), 8);
+  EXPECT_EQ(c.number_of_edges(), 5);
+}
+
 TEST(ArithmeticCircuitTest, Degree) {
   auto c = algebra::ArithmeticCircuit<ds::set::SortedVectorSet>(4);
   c.add_addition_gate(VI({0, 1, 2}));
@@ -123,4 +160,28 @@ TEST(ArithmeticCircuitTest, Degree) {
 
   EXPECT_EQ(c.get_output_nodes(), VI({3, 4, 5, 6}));
   EXPECT_EQ(c.degree(), 9);
+}
+
+TEST(ArithmeticCircuitTest, IsOutputReachable) {
+  auto c = algebra::ArithmeticCircuit<ds::set::SortedVectorSet>(3);
+  EXPECT_EQ(c.add_addition_gate(VI({0, 1}), false), 3);
+  EXPECT_EQ(c.add_addition_gate(VI({1, 2}), false), 4);
+  EXPECT_EQ(c.add_multiplication_gate(VI({3}), true), 5);
+  EXPECT_EQ(c.add_multiplication_gate(VI({3, 4}), true), 6);
+  EXPECT_EQ(c.add_addition_gate(VI({5, 6}), true), 7);
+  c.remove_edge(0, 3);
+  c.remove_edge(3, 5);
+
+  EXPECT_EQ(c.get_output_nodes(), VI({5, 6, 7}));
+  EXPECT_FALSE(c.is_output_reachable());
+  c.reset_output_node(5);
+  EXPECT_EQ(c.get_output_nodes(), VI({6, 7}));
+  EXPECT_TRUE(c.is_output_reachable());
+  c.reset_output_node(7);
+  EXPECT_TRUE(c.is_output_reachable());
+
+  EXPECT_EQ(c.add_addition_gate(VI({0, 5}), true), 8);
+  EXPECT_TRUE(c.is_output_reachable());
+  c.remove_edge(0, 8);
+  EXPECT_FALSE(c.is_output_reachable());
 }

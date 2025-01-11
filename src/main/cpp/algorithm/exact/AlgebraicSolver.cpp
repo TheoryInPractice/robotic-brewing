@@ -1,4 +1,6 @@
 #include "AlgebraicSolver.hpp"
+#include "algebra/MultilinearDetectorRunner.hpp"
+#include "algorithm/graph/shortest_path.hpp"
 
 namespace algorithm {
 namespace exact {
@@ -214,7 +216,7 @@ static void create_circuit(                    //
     assert(circ.number_of_output_nodes() == 1);
   }
 
-  log_debug("%s: Created circuit: k=%d, s=%d, t=%d, lb=%d, ub=%d, #nodes=%lu (+:%lu, *:%lu), #edges=%lu, elapsed=%.3f",
+  log_debug("%s: Created circuit: k=%d, s=%d, t=%d, lb=%d, ub=%d, #nodes=%lu (+:%lu, *:%lu), #edges=%lu, elapsed=%.3fs",
             solver->get_solver_name(), k, s, t, lb, ub, circ.number_of_nodes(), circ.number_of_addition_gates(),
             circ.number_of_multiplication_gates(), circ.number_of_edges(), circuit_create_time.stop());
 }
@@ -238,6 +240,294 @@ static int adjust_num_trials(int original_num_trials, double success_probability
     ++num_trials;
   }
   return num_trials;
+}
+
+/**
+ * @brief Finds a shortest walk collecting colors in the given order.
+ *
+ * @param solver
+ * @param s source
+ * @param t destination
+ * @param color_order color order
+ * @return std::vector<int> solution walk
+ */
+static std::vector<int> solve_with_color_order(base::BaseSolver const *solver, int s, int t, std::vector<int> const &color_order) {
+  auto &g = solver->get_graph();
+
+  ds::graph::Graph h;
+  std::unordered_map<int, int> vertex_mapping;
+
+  // source
+  h.add_vertex(0, {});
+  vertex_mapping[0] = s;
+
+  // destination
+  h.add_vertex(1, {});
+  vertex_mapping[1] = t;
+
+  // internal layers
+  int cur = 0, nxt = 1;
+  std::vector<int> layers[2];
+  layers[cur].push_back(0);
+
+  for (auto c : color_order) {
+    layers[nxt].clear();
+    for (auto v : g.vertices()) {
+      if (solver->get_compact_colors(v).get(c)) {
+        // create new vertex
+        int u = vertex_mapping.size();
+        h.add_vertex(u, {});
+        vertex_mapping[u] = v;
+        layers[nxt].push_back(u);
+
+        // create edge
+        for (auto p : layers[cur]) {
+          auto pp = vertex_mapping[p];
+          h.add_edge(p, u, pp == v ? 0 : g.get_weight(pp, v));
+        }
+      }
+    }
+    std::swap(cur, nxt);
+  }
+
+  // edges to destination
+  for (auto p : layers[cur]) {
+    auto pp = vertex_mapping[p];
+    h.add_edge(p, 1, pp == t ? 0 : g.get_weight(pp, t));
+  }
+
+  // find shortest path
+  auto path = algorithm::graph::shortest_path(h, 0, 1);
+
+  // convert vertex labels
+  std::vector<int> ret;
+  for (auto v : path) ret.push_back(vertex_mapping[v]);
+  return ret;
+}
+
+/**
+ * @brief Makes a node invalid.
+ *
+ * @param circ circuit
+ * @param nodes nodes to invalidate
+ * @return std::vector<std::pair<int, int>> removed edges
+ */
+static std::vector<std::pair<int, int>> invalidate_nodes(Circuit &circ, std::vector<int> const &nodes) {
+  std::vector<std::pair<int, int>> ret;
+  std::queue<int> q;
+  for (auto v : nodes) q.push(v);
+
+  while (!q.empty()) {
+    auto p = q.front();
+    q.pop();
+    for (auto u : circ.get_out_neighbors(p)) {
+      if (circ.is_multiplication_node(u)) {
+        // invalidate this mul gate
+        q.push(u);
+      } else {
+        assert(circ.is_addition_node(u));
+        // printf("Removing: %d,%d\n", p, u);
+        ret.push_back({p, u});
+        circ.remove_edge(p, u);
+        if (circ.in_degree(u) == 0) q.push(u);  // chain this addition gate
+      }
+    }
+  }
+  return ret;
+}
+
+static std::vector<int> find_certificate_two_phase(  //
+    base::BaseSolver const *solver,                  //
+    util::Random &rand,                              //
+    int num_threads,                                 //
+    int k,                                           // number of colors to collect
+    int s,                                           // source
+    int t,                                           // destination
+    int c,                                           // number of total colors
+    int walk_length,                                 // objective
+    std::atomic_bool *cancel_token                   //
+) {
+  // Phase 1: Find an optimal color order.
+  // Crete a semi-compact circuit.
+  std::unordered_map<int, int> node_ids;
+  std::unordered_set<int> color_nodes;
+
+  Circuit circ(c);
+  impl::create_circuit(solver, false, algebraic::CompactStrategy::SemiCompact, k, s, t, walk_length, walk_length, circ,
+                       &node_ids, &color_nodes);
+  // log_info("%s: Created circuit: #vars=%lu, #nodes=%lu (+:%lu, *:%lu), #edges=%lu, k=%d, #threads=%d",
+  //          solver->get_solver_name(), circ.number_of_variables(), circ.number_of_nodes(), circ.number_of_addition_gates(),
+  //          circ.number_of_multiplication_gates(), circ.number_of_edges(), k, num_threads);
+
+  circ.remove_unreachable();
+  auto output_node = circ.get_output_nodes().front();
+  std::unordered_set<int> frontier;  // mult gates at the working layer
+  for (auto v : circ.get_in_neighbors(output_node)) frontier.insert(v);
+  std::vector<int> color_order;  // stores result
+
+  // Create auxiliary color nodes;
+  std::unordered_map<int, int> aux_color_nodes;  // mapping from color_node -> aux_color_node
+  std::unordered_set<int> aux_color_node_set;
+  for (auto v : color_nodes) {
+    auto node = circ.add_addition_gate({}, false);
+    aux_color_nodes[v] = node;
+    aux_color_node_set.insert(node);
+  }
+
+  // Process from the last layer.
+  Circuit circ_test[2] = {1, 1};
+  for (int layer = k; layer >= 1; --layer) {
+    // circ.remove_unreachable(aux_color_node_set);
+    // for (auto it = frontier.begin(); it != frontier.end();) {
+    //   if (circ.has_node(*it)) {
+    //     ++it;
+    //   } else {
+    //     it = frontier.erase(it);
+    //   }
+    // }
+
+    // log_debug("layer=%d, frontier=%s", layer, cstr(frontier));
+    // log_debug("nodes=%s, edges=%s", cstr(circ.nodes()), cstr(circ.edges()));
+    std::vector<std::pair<int, int>> to_remove;
+    std::unordered_set<int> target_color_nodes;
+
+    // Analyze this layer.
+    for (auto v : frontier) {
+      for (auto u : circ.get_in_neighbors(v)) {
+        if (util::contains(color_nodes, u)) {
+          to_remove.push_back({u, v});
+          target_color_nodes.insert(u);
+          circ.remove_edge(u, v);  // remove edge to this layer
+        }
+      }
+    }
+
+    std::vector<int> target_color_count(c);
+    for (auto u : target_color_nodes) {
+      for (auto w : circ.get_in_neighbors(u)) ++target_color_count[w];
+    }
+    std::vector<std::pair<int, int>> candidates;  // count, color
+    for (int i = 0; i < c; ++i) {
+      if (target_color_count[i] > 0) candidates.push_back({target_color_count[i], i});
+    }
+    std::sort(candidates.rbegin(), candidates.rend());  // heuristic
+    // log_debug("Layer %d: candidates=%s", layer, cstr(candidates));
+
+    // Guess a valid color at this layer.
+    std::size_t color_lo = 0, color_hi = candidates.size();
+    while (color_lo + 1 < color_hi) {
+      auto color_mid = (color_lo + color_hi) / 2;
+
+      // Copy and modify circuit.
+      bool circ_initialized[2] = {false, false};
+
+      for (int current = 0;; current ^= 1) {
+        if (!circ_initialized[current]) {
+          circ_test[current] = circ;
+
+          // Modify circuit.
+          std::unordered_set<int> aux_nodes;
+          std::vector<int> invalid_nodes;
+
+          for (std::size_t i = (current == 0 ? color_lo : color_mid); i < (current == 0 ? color_mid : color_hi); ++i) {
+            auto w = candidates[i].second;
+            for (auto u : circ_test[current].get_out_neighbors(w)) {
+              auto uu = aux_color_nodes[u];
+              circ_test[current].add_edge(w, uu);
+              aux_nodes.insert(uu);
+            }
+          }
+          for (auto &uv : to_remove) {
+            auto v = uv.second;
+            auto uu = aux_color_nodes[uv.first];
+            if (util::contains(aux_nodes, uu)) { circ_test[current].add_edge(uu, v); }
+          }
+          // Invalidate mult gates with no variable input.
+          for (auto v : frontier) {
+            if (circ_test[current].in_degree(v) == 1) invalid_nodes.push_back(v);
+          }
+          // log_debug("INNER: invalid_nodes: %s", cstr(invalid_nodes));
+          invalidate_nodes(circ_test[current], invalid_nodes);
+
+          if (circ_test[current].in_degree(circ_test[current].get_output_nodes().front()) == 0) {
+            // Cannot reach the output node.
+            color_lo = (current == 0 ? color_mid : color_lo);
+            color_hi = (current == 0 ? color_hi : color_mid);
+            break;
+          }
+
+          circ_test[current].remove_unreachable();
+          circ_initialized[current] = true;
+        }
+
+        // Multilinear testing.
+        algebra::MultilinearDetectorRunner det(circ_test[current], k, num_threads);
+        auto ret = det.run(rand, cancel_token);
+
+        if (ret.front()) {
+          // Success
+          color_lo = (current == 0 ? color_lo : color_mid);
+          color_hi = (current == 0 ? color_mid : color_hi);
+          break;
+        }
+      }
+    }
+
+    // Finalize this layer
+    auto confirmed_color = candidates[color_lo].second;
+    // log_debug("Layer %d: confirmed_color=%d", layer, confirmed_color);
+    color_order.push_back(confirmed_color);
+
+    // Proceed to the next layer.
+    if (layer > 1) {
+      std::unordered_set<int> confirmed_color_nodes;
+      std::vector<int> invalid_nodes;
+      for (auto u : circ.get_out_neighbors(confirmed_color)) confirmed_color_nodes.insert(u);
+      for (auto &uv : to_remove) {
+        // Add edges directly to the current layer.
+        if (util::contains(confirmed_color_nodes, uv.first)) circ.add_edge(confirmed_color, uv.second);
+      }
+      for (auto u : confirmed_color_nodes) {
+        // Remove edges to the former layers.
+        circ.remove_edge(confirmed_color, u);
+        if (circ.in_degree(u) == 0) invalid_nodes.push_back(u);
+      }
+
+      // Remove mult gates with no variable input.
+      for (auto v : frontier) {
+        if (circ.has_node(v) && circ.in_degree(v) == 1) invalid_nodes.push_back(v);
+      }
+
+      if (!invalid_nodes.empty()) invalidate_nodes(circ, invalid_nodes);
+
+      std::unordered_set<int> pred;
+      for (auto v : frontier) {
+        if (!circ.has_node(v)) continue;  // already removed
+        for (auto u : circ.get_in_neighbors(v)) {
+          if (!circ.is_variable_node(u)) {
+            assert(!util::contains(color_nodes, u));
+            pred.insert(u);
+          }
+        }
+      }
+      frontier.clear();
+      for (auto u : pred) {
+        if (circ.is_multiplication_node(u)) {
+          frontier.insert(u);
+        } else {
+          for (auto w : circ.get_in_neighbors(u)) {
+            assert(circ.is_multiplication_node(w));
+            frontier.insert(w);
+          }
+        }
+      }
+    }
+  }
+  std::reverse(color_order.begin(), color_order.end());
+  log_debug("AlgebraicSolver: Found optimal color order: %s", cstr(color_order));
+
+  // Phase 2: Reduce to the shortest path problem.
+  return solve_with_color_order(solver, s, t, color_order);
 }
 }  // namespace impl
 
@@ -403,7 +693,8 @@ int AlgebraicSolver::run_standard_binary_search(int k, int source, int destinati
     if (test_walk_length(k, source, destination, c, lo, m, num_confident_failures_, cancel_token)) {
       hi = m;  // minimize feasible k
       if (recover_all_) {
-        find_certificate(k, source, destination, c, hi, num_confident_failures_, cancel_token);  // solution recovery
+        // solution recovery
+        find_certificate(k, source, destination, c, hi, num_confident_failures_, cancel_token);
       }
 
       // obtained weight can be less than the target
@@ -631,8 +922,9 @@ int AlgebraicSolver::run_sequential_search(int k, int source, int destination, i
     log_debug("%s: Testing objective: %d <- [%d, %d]", get_solver_name(), m, lo, hi);
     if (test_walk_length(k, source, destination, c, lo, m, num_confident_failures_, cancel_token)) {
       hi = m;  // minimize feasible k
-      if (recover_all_)
+      if (recover_all_) {
         find_certificate(k, source, destination, c, hi, num_confident_failures_, cancel_token);  // solution recovery
+      }
 
       // obtained weight can be less than the target
       hi = std::min(hi, static_cast<int>(get_solution_weight()));
@@ -644,19 +936,24 @@ int AlgebraicSolver::run_sequential_search(int k, int source, int destination, i
 }
 
 int AlgebraicSolver::run_multi_output_search(int k, int source, int destination, int c, int lo, int hi, std::atomic_bool *cancel_token) {
-  for (int iteration = 0; lo < hi && iteration < num_confident_failures_; ++iteration) {
-    // create a circuit
-    Circuit circ(c);
-    impl::create_circuit(this, true, compact_level_, k, source, destination, lo, hi - 1, circ, nullptr, nullptr);
+  // create a circuit
+  Circuit circ(c);
+  impl::create_circuit(this, true, compact_level_, k, source, destination, lo, hi - 1, circ, nullptr, nullptr);
+  circ.remove_unreachable();
+  auto out_nodes = circ.get_output_nodes();
 
+  for (int iteration = 0; lo < hi && iteration < num_confident_failures_; ++iteration) {
     // run detector
-    algebra::MultilinearDetector detector(circ, k, num_threads_);
-    auto ret = detector.run_single(rand_, cancel_token);
+    algebra::MultilinearDetectorRunner detector(circ, k, num_threads_);
+    auto ret = detector.run(rand_, cancel_token);
 
     for (int i = lo; i < hi; ++i) {
       if (ret[i - lo]) {
+        log_info("%s: Found upper bound: it=%d, lb=%d, ub=%d", get_solver_name(), iteration, lo, i);
+
+        // remove unnecessary output nodes
+        for (int j = i; j < hi; ++j) circ.remove_and_clean_node(out_nodes[j - lo]);
         hi = i;
-        log_info("%s: Found upper bound: it=%d, lb=%d, ub=%d", get_solver_name(), iteration, lo, hi);
         break;
       }
     }
@@ -691,39 +988,54 @@ bool AlgebraicSolver::test_walk_length(int k, int s, int t, int c, int lb, int u
 //==============================================================================
 
 void AlgebraicSolver::find_certificate(int k, int s, int t, int c, int walk_length, int num_trials, std::atomic_bool *cancel_token) {
-  log_info("%s: Finding certificate: objective=%d", get_solver_name(), walk_length);
+  if (recovery_strategy_ == algebraic::RecoveryStrategy::None) {
+    // skip solution recovery
+    log_info("%s: Skipping solution recovery", get_solver_name());
+    return;
+  }
+
+  char const *recovery_strategy_name[] = {"MonteCarlo", "LasVegas", "TwoPhase"};
+  char const *strategy = recovery_strategy_name[recovery_strategy_];
+  log_info("%s: Finding certificate: objective=%d, strategy=%s", get_solver_name(), walk_length, strategy);
   util::Timer timer;
+  std::vector<int> solution_walk;
 
-  // create a circuit
-  std::unordered_map<int, int> node_ids;
-  std::unordered_set<int> color_nodes;
-  Circuit circ(c);
-  impl::create_circuit(this, false, compact_level_, k, s, t, walk_length, walk_length, circ, &node_ids, &color_nodes);
-  log_info("%s: Created circuit: #vars=%lu, #nodes=%lu (+:%lu, *:%lu), #edges=%lu, k=%d, #threads=%d",
-           get_solver_name(), circ.number_of_variables(), circ.number_of_nodes(), circ.number_of_addition_gates(),
-           circ.number_of_multiplication_gates(), circ.number_of_edges(), k, num_threads_);
+  if (recovery_strategy_ == algebraic::RecoveryStrategy::TP) {
+    // two phase recovery
+    solution_walk = impl::find_certificate_two_phase(this, rand_, num_threads_, k, s, t, c, walk_length, cancel_token);
+  } else {
+    // create a circuit
+    std::unordered_map<int, int> node_ids;
+    std::unordered_set<int> color_nodes;
+    Circuit circ(c);
+    impl::create_circuit(this, false, compact_level_, k, s, t, walk_length, walk_length, circ, &node_ids, &color_nodes);
+    log_info("%s: Created circuit: #vars=%lu, #nodes=%lu (+:%lu, *:%lu), #edges=%lu, k=%d, #threads=%d",
+             get_solver_name(), circ.number_of_variables(), circ.number_of_nodes(), circ.number_of_addition_gates(),
+             circ.number_of_multiplication_gates(), circ.number_of_edges(), k, num_threads_);
 
-  // find a certificate circuit
-  bool use_las_vegas = recovery_strategy_ == algebraic::RecoveryStrategy::LV;
-  if (!use_las_vegas) {
-    int orig_num_trials = num_trials;
-    num_trials = impl::adjust_num_trials(num_trials, impl::SINGLE_RUN_SUCCESS_PROBABILITY,
-                                         k * std::log2(get_graph().number_of_vertices()));
-    log_debug("%s: Adjusted num_trials: from=%d, to=%d", get_solver_name(), orig_num_trials, num_trials);
+    // find a certificate circuit
+    bool use_las_vegas = recovery_strategy_ == algebraic::RecoveryStrategy::LV;
+    if (!use_las_vegas) {
+      int orig_num_trials = num_trials;
+      num_trials = impl::adjust_num_trials(num_trials, impl::SINGLE_RUN_SUCCESS_PROBABILITY,
+                                           k * std::log2(get_graph().number_of_vertices()));
+      log_debug("%s: Adjusted num_trials: from=%d, to=%d", get_solver_name(), orig_num_trials, num_trials);
+    }
+    algebra::MultilinearDetector detector(circ, k, num_threads_);
+    auto cert = detector.find_certificate(rand_, color_nodes, cancel_token, use_las_vegas, num_trials);
+
+    // backtrack nodes in the certificate circuit
+    solution_walk.push_back(t);
+    for (auto node : cert.topological_ordering(true)) {
+      if (util::contains(node_ids, node)) solution_walk.push_back(node_ids.at(node));
+    }
+    solution_walk.push_back(s);
+    std::reverse(solution_walk.begin(), solution_walk.end());
   }
-  algebra::MultilinearDetector detector(circ, k, num_threads_);
-  auto cert = detector.find_certificate(rand_, color_nodes, cancel_token, use_las_vegas, num_trials);
 
-  // backtrack nodes in the certificate circuit
-  std::vector<int> vs = {t};
-  for (auto node : cert.topological_ordering(true)) {
-    if (util::contains(node_ids, node)) vs.push_back(node_ids.at(node));
-  }
-  vs.push_back(s);
-  std::reverse(vs.begin(), vs.end());
-
-  log_info("%s: Found certificate walk: objective=%d, elapsed=%.3fs", get_solver_name(), walk_length, timer.stop());
-  set_critical_walk(vs);
+  log_info("%s: Found certificate walk: objective=%d, strategy=%s, elapsed=%.3fs", get_solver_name(), walk_length,
+           strategy, timer.stop());
+  set_critical_walk(solution_walk);
 }
 
 }  // namespace exact

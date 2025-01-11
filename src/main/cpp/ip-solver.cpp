@@ -1,5 +1,7 @@
 #include <memory>
 
+#include "nadeau.h"
+
 #include "algorithm/exact/AlgebraicSolver.hpp"
 #include "algorithm/exact/DPSolver.hpp"
 #include "algorithm/exact/ILPSolver.hpp"
@@ -148,9 +150,12 @@ int main(int argc, char* argv[]) {
 #endif
     // run the solver
     bool resolved = solver->solve(instance.k, instance.s, instance.t, conf.time_limit);
+    auto elapsed = timer.stop();
+
+    // report memory usage
+    log_info("Peak memory usage: %lu bytes", getPeakRSS());
 
     // report results
-    auto elapsed = timer.stop();
     if (resolved) {
       if (solver->is_feasible()) {
         log_success(
